@@ -129,7 +129,7 @@ app.get("/", (req: Request, res: Response) => {
 
 app.post(
   "/api/add-course",
-
+  verifyToken,verifyAdmin,
   async (req: Request, res: Response) => {
     const cours = req.body;
     const result = await courseCollection.insertOne(cours);
@@ -196,7 +196,7 @@ app.get("/api/add-course/latest", async (req: Request, res: Response) => {
 //----------------------------------
 // GET - শুধু নির্দিষ্ট instructor এর কোর্স (Manage Courses পেজের জন্য)
 // এই route /:id এর আগেই থাকতে হবে
-app.get("/api/add-course/user/:userId", async (req: Request, res: Response) => {
+app.get("/api/add-course/user/:userId",verifyToken,verifyAdmin, async (req: Request, res: Response) => {
   const { userId } = req.params;
   const courses = await courseCollection
     .find({ createdBy: userId })
@@ -207,7 +207,7 @@ app.get("/api/add-course/user/:userId", async (req: Request, res: Response) => {
 
 //----------------------------------
 // ⚠️ সবার শেষে রাখতে হবে — Get single course by ID
-app.get("/api/add-course/:id", async (req: Request, res: Response) => {
+app.get("/api/add-course/:id",verifyToken, async (req: Request, res: Response) => {
   const id = req.params.id as string;
 
   if (!ObjectId.isValid(id)) {
@@ -226,7 +226,7 @@ app.get("/api/add-course/:id", async (req: Request, res: Response) => {
 
 //---------------------
 // PATCH - Update course (শুধু owner পারবে)
-app.patch("/api/add-course/:id", async (req: Request, res: Response) => {
+app.patch("/api/add-course/:id",verifyToken,verifyAdmin, async (req: Request, res: Response) => {
   const id = req.params.id as string;
   const { userId, ...updateData } = req.body;
 
@@ -253,7 +253,7 @@ app.patch("/api/add-course/:id", async (req: Request, res: Response) => {
 });
 
 // DELETE - Delete course (শুধু owner পারবে)
-app.delete("/api/add-course/:id", async (req: Request, res: Response) => {
+app.delete("/api/add-course/:id",verifyToken,verifyAdmin, async (req: Request, res: Response) => {
   const id = req.params.id as string;
   const userId = req.query.userId as string;
 
