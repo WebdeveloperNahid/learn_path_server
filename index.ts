@@ -103,15 +103,15 @@ const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
   next();
 };
 
-const verifyUser = async (req: Request, res: Response, next: NextFunction) => {
-  if (req.user?.role !== "user") {
-    return res.status(403).send({ message: "forbidden access" });
-  }
-  next();
-};
+// const verifyUser = async (req: Request, res: Response, next: NextFunction) => {
+//   if (req.user?.role !== "user") {
+//     return res.status(403).send({ message: "forbidden access" });
+//   }
+//   next();
+// };
 
 const verifyAdmin = async (req: Request, res: Response, next: NextFunction) => {
-  if (req.user?.role !== "admin") {
+  if (req.user?.role !== "instructor") {
     return res.status(403).send({ message: "forbidden access" });
   }
   next();
