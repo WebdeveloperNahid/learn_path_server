@@ -139,7 +139,7 @@ app.post(
 
 //----------------------------------
 // GET - সব কোর্স (search, filter, sort, pagination সহ)
-app.get("/api/add-course", async (req: Request, res: Response) => {
+app.get("/api/add-course",verifyToken, async (req: Request, res: Response) => {
   const { search, category, level, minPrice, maxPrice, sort } =
     req.query as Record<string, string>;
   const page = parseInt(req.query.page as string) || 1;
@@ -187,7 +187,7 @@ app.get("/api/add-course/latest", async (req: Request, res: Response) => {
   const courses = await courseCollection
     .find()
     .sort({ _id: -1 })
-    .limit(6)
+    .limit(8)
     .toArray();
 
   res.send(courses);
