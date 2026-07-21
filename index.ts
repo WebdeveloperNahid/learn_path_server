@@ -10,7 +10,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const app = express();
 const port = process.env.PORT || 5000;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
-const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
 // Middleware — CORS আগে
 app.use(cors());
@@ -24,6 +24,7 @@ let courseCollection!: Collection;
 let enrollmentCollection!: Collection;
 let userCollection!: Collection;
 let sessionCollection!: Collection;
+let recommendationFeedbackCollection!: Collection;
 
 let isConnected = false;
 let connectionPromise: Promise<void> | null = null;
@@ -40,6 +41,7 @@ async function connectToMongoDB() {
       enrollmentCollection = database.collection("enrollments");
       userCollection = database.collection("user");
       sessionCollection = database.collection("session");
+      recommendationFeedbackCollection = database.collection("recommendationFeedback");
       isConnected = true;
       console.log("You successfully connected to MongoDB!");
     } catch (err) {
@@ -106,12 +108,12 @@ const verifyToken = async (req: Request, res: Response, next: NextFunction) => {
   next();
 };
 
-// const verifyUser = async (req: Request, res: Response, next: NextFunction) => {
-//   if (req.user?.role !== "user") {
-//     return res.status(403).send({ message: "forbidden access" });
-//   }
-//   next();
-// };
+const verifyUser = async (req: Request, res: Response, next: NextFunction) => {
+  if (req.user?.role !== "user") {
+    return res.status(403).send({ message: "forbidden access" });
+  }
+  next();
+};
 
 const verifyAdmin = async (req: Request, res: Response, next: NextFunction) => {
   if (req.user?.role !== "instructor") {
@@ -303,13 +305,14 @@ app.delete(
 
 //----------------------------------
 // AI - Content Generator (course description generate করার জন্য)
+// AI - Content Generator (real regenerate variation সহ)
 app.post(
   "/api/ai/generate-description",
   verifyToken,
   verifyAdmin,
   async (req: Request, res: Response) => {
     try {
-      const { title, category, level, length } = req.body;
+      const { title, category, level, length, attempt } = req.body;
 
       if (!title || !category) {
         return res
@@ -320,13 +323,18 @@ app.post(
       const wordTarget =
         length === "short" ? "40-60" : length === "long" ? "150-200" : "80-120";
 
+      const variationHint =
+        attempt && attempt > 1
+          ? ` This is regeneration attempt #${attempt} — give a genuinely different angle from a typical version: vary the opening line, highlight a different practical benefit or outcome than usual, and change the sentence structure.`
+          : "";
+
       const prompt = `You are an expert course content writer. Write a compelling course description for an online course.
 
 Course Title: ${title}
 Category: ${category}
 Level: ${level || "Beginner"}
 
-Write ONLY the description text (${wordTarget} words), no headings, no markdown, no quotes. Make it engaging, highlight practical outcomes, and match the tone of a professional online learning platform.`;
+Write ONLY the description text (${wordTarget} words), no headings, no markdown, no quotes. Make it engaging, highlight practical outcomes, and match the tone of a professional online learning platform.${variationHint}`;
 
       const result = await model.generateContent(prompt);
       const text = result.response.text();
@@ -342,6 +350,7 @@ Write ONLY the description text (${wordTarget} words), no headings, no markdown,
 //----------------------------------
 
 // AI - Chat Assistant (platform/course বিষয়ক প্রশ্নের উত্তর দিবে)
+// AI - Chat Assistant (platform/course বিষয়ক প্রশ্নের উত্তর দিবে + real AI follow-ups)
 app.post("/api/ai/chat", async (req: Request, res: Response) => {
   try {
     const { message, history } = req.body as {
@@ -353,7 +362,6 @@ app.post("/api/ai/chat", async (req: Request, res: Response) => {
       return res.status(400).send({ error: "Message is required" });
     }
 
-    // Platform এর latest কোর্স গুলো context হিসেবে পাঠানো হচ্ছে, যাতে AI real data দিয়ে উত্তর দিতে পারে
     const courses = await courseCollection
       .find(
         {},
@@ -384,7 +392,12 @@ ${courseContext}
 
 Answer the user's question helpfully and concisely. If they ask about courses, recommend from the list above when relevant. If they ask about navigating the site, guide them (e.g. "/all-course" to browse, "/signup" to create an account). Keep responses under 100 words unless more detail is clearly needed.
 
-IMPORTANT: Do not use any markdown formatting such as **, #, bullet points with *, or numbered lists. Write in plain, natural sentences only, separating items with commas if needed.`;
+Do not use any markdown formatting such as **, #, bullet points with *, or numbered lists. Write in plain, natural sentences only.
+
+After answering, also suggest 3 short, relevant follow-up questions the user is likely to ask next, based specifically on this answer and the conversation so far — not generic ones.
+
+Respond ONLY in this exact JSON format, nothing else, no extra text before or after:
+{"reply": "your answer text here", "followUps": ["question 1", "question 2", "question 3"]}`;
 
     const chatHistory =
       history?.map((h) => ({
@@ -404,14 +417,218 @@ IMPORTANT: Do not use any markdown formatting such as **, #, bullet points with 
     });
 
     const result = await chat.sendMessage(message);
-    const text = result.response.text();
+    const rawText = result.response.text().trim();
 
-    res.send({ reply: text.trim() });
+    let parsed: { reply: string; followUps: string[] };
+    try {
+      const cleaned = rawText.replace(/```json|```/g, "").trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      parsed = { reply: rawText, followUps: [] };
+    }
+
+    res.send({ reply: parsed.reply, followUps: parsed.followUps || [] });
   } catch (err) {
     console.error("AI chat error:", err);
     res.status(500).send({ error: "Failed to get AI response" });
   }
 });
+
+// AI - Smart Recommendation Engine
+app.get(
+  "/api/ai/recommend/:userId",
+  verifyToken,
+  async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const { category: filterCategory } = req.query as Record<string, string>;
+
+      const enrollments = await enrollmentCollection.find({ userId }).toArray();
+      const enrolledCourseIds = enrollments
+        .map((e) => e.courseId?.toString())
+        .filter(Boolean);
+
+      const enrolledCourses = enrolledCourseIds.length
+        ? await courseCollection
+            .find({ _id: { $in: enrolledCourseIds.map((id) => new ObjectId(id)) } })
+            .project({ title: 1, category: 1, level: 1 })
+            .toArray()
+        : [];
+
+      const excludeIds = enrolledCourseIds.map((id) => new ObjectId(id));
+
+      const feedback = await recommendationFeedbackCollection
+        .find({ userId })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .toArray();
+
+      const dismissedIds = feedback
+        .filter((f) => f.action === "dismissed")
+        .map((f) => f.courseId?.toString());
+
+      let candidateQuery: Record<string, unknown> = {
+        _id: { $nin: [...excludeIds, ...dismissedIds.map((id) => new ObjectId(id))] },
+      };
+      if (filterCategory && filterCategory !== "All") {
+        candidateQuery.category = filterCategory;
+      }
+
+      const candidateCourses = await courseCollection
+        .find(candidateQuery)
+        .project({ title: 1, category: 1, level: 1, price: 1, rating: 1 })
+        .limit(40)
+        .toArray();
+
+      // নতুন ইউজার — কোনো enrollment history নাই
+      if (enrolledCourses.length === 0) {
+        const popular = await courseCollection
+          .find(filterCategory && filterCategory !== "All" ? { category: filterCategory } : {})
+          .sort({ rating: -1 })
+          .limit(4)
+          .toArray();
+
+        return res.send({
+          recommendations: popular.map((c) => ({
+            courseId: c._id,
+            title: c.title,
+            reason: "Popular course among learners on the platform.",
+          })),
+        });
+      }
+
+      const enrolledContext = enrolledCourses
+        .map((c) => `- ${c.title} (${c.category}, ${c.level})`)
+        .join("\n");
+
+      const candidateContext = candidateCourses
+        .map((c) => `- id:${c._id} | ${c.title} (${c.category}, ${c.level}, $${c.price})`)
+        .join("\n");
+
+      const feedbackContext = feedback.length
+        ? feedback
+            .map((f) => `- learner ${f.action} a previously suggested course (id ${f.courseId})`)
+            .join("\n")
+        : "No prior recommendation interaction yet.";
+
+      const prompt = `A learner on an online course platform has enrolled in these courses:
+${enrolledContext}
+
+Recent interaction with previous recommendations:
+${feedbackContext}
+
+Here are other available courses on the platform:
+${candidateContext}
+
+Based on the learner's enrollment pattern (categories, level, skill progression) and their past interaction with recommendations (avoid suggesting things similar to dismissed ones, lean toward categories they clicked into), pick the 4 most relevant courses from the available list.
+
+Respond ONLY in this exact JSON format, nothing else:
+{"recommendations": [{"courseId": "the id from the list", "title": "course title", "reason": "one short sentence explaining why this fits this specific learner"}]}`;
+
+      const result = await model.generateContent(prompt);
+      const rawText = result.response.text().trim();
+
+      let parsed;
+      try {
+        const cleaned = rawText.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(cleaned);
+      } catch {
+        parsed = { recommendations: [] };
+      }
+
+      res.send(parsed);
+    } catch (err) {
+      console.error("AI recommend error:", err);
+      res.status(500).send({ error: "Failed to generate recommendations" });
+    }
+  },
+);
+
+// AI - Recommendation feedback (continuously improve করার জন্য)
+app.post(
+  "/api/ai/recommend/feedback",
+  verifyToken,
+  async (req: Request, res: Response) => {
+    try {
+      const { userId, courseId, action } = req.body as {
+        userId: string;
+        courseId: string;
+        action: "clicked" | "dismissed";
+      };
+
+      if (!userId || !courseId || !action) {
+        return res.status(400).send({ error: "Missing required fields" });
+      }
+
+      await recommendationFeedbackCollection.insertOne({
+        userId,
+        courseId,
+        action,
+        createdAt: new Date(),
+      });
+
+      res.send({ success: true });
+    } catch (err) {
+      console.error("Recommendation feedback error:", err);
+      res.status(500).send({ error: "Failed to save feedback" });
+    }
+  },
+);
+
+//----------------------------------
+// POST - Enroll in a course (payment ছাড়া, simple version)
+app.post(
+  "/api/enroll",
+  verifyToken,
+  async (req: Request, res: Response) => {
+    try {
+      const { courseId } = req.body;
+      const userId = (req.user as any)._id.toString();
+
+      if (!courseId) {
+        return res.status(400).send({ error: "courseId is required" });
+      }
+
+      // আগে থেকেই enroll করা কিনা চেক
+      const existing = await enrollmentCollection.findOne({
+        userId,
+        courseId,
+      });
+      if (existing) {
+        return res.status(400).send({ error: "Already enrolled" });
+      }
+
+      const result = await enrollmentCollection.insertOne({
+        userId,
+        courseId,
+        enrolledAt: new Date(),
+      });
+
+      res.send({ success: true, enrollmentId: result.insertedId });
+    } catch (err) {
+      console.error("Enroll error:", err);
+      res.status(500).send({ error: "Failed to enroll" });
+    }
+  },
+);
+
+// GET - user এর enrollment list (My Courses পেজের জন্যও কাজে লাগবে)
+app.get(
+  "/api/enroll/user/:userId",
+  verifyToken,verifyUser,
+  async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const enrollments = await enrollmentCollection
+        .find({ userId })
+        .toArray();
+      res.send(enrollments);
+    } catch (err) {
+      console.error("Get enrollments error:", err);
+      res.status(500).send({ error: "Failed to fetch enrollments" });
+    }
+  },
+);
 
 //-----------------------------------
 if (process.env.NODE_ENV !== "production") {
