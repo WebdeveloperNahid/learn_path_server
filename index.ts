@@ -10,7 +10,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const app = express();
 const port = process.env.PORT || 5000;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
-const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash-lite" });
 
 // Middleware — CORS আগে
 app.use(cors());
